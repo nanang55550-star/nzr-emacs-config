@@ -1,5 +1,5 @@
 ;; ╔══════════════════════════════════════════════════════════════════════╗
-;; ║   EMACS CONFIG — FINAL v8.3  (Universal · Termux · Desktop)          ║
+;; ║   EMACS CONFIG — FINAL v8.7  (Universal · Termux · Desktop)          ║
 ;; ║   VS Code Edition: Flutter Widget Tree Guides · Rainbow · Powerline  ║
 ;; ║                                                                        ║
 ;; ║   Changelog v8.3 — Flutter Widget Tree Guides (VS Code style):        ║
@@ -118,21 +118,29 @@
 ;; ════════════════════════════════════════════════════════════════════════
 
 (defun my/byte-compile-on-save ()
-  "Byte-compile file .el saat disimpan jika .elc sudah ada sebelumnya."
+  "Byte-compile file .el saat disimpan — selalu, tidak perlu .elc dulu ada."
   (when (and buffer-file-name
              (string-suffix-p ".el" buffer-file-name)
-             (file-exists-p (concat buffer-file-name "c")))
-    (byte-compile-file buffer-file-name)))
+             (not (string-match-p "\\(-autoloads\\|-pkg\\|-test\\)\\.el$"
+                                  buffer-file-name))
+             (not (string-suffix-p ".dir-locals.el" buffer-file-name)))
+    (with-demoted-errors "[NZR byte-compile on-save] %s"
+      (byte-compile-file buffer-file-name)
+      (message "[NZR] Compiled %s.elc"
+               (file-name-nondirectory buffer-file-name)))))
 
 (add-hook 'after-save-hook #'my/byte-compile-on-save)
 
 (defun my/byte-compile-init-on-save ()
-  "Khusus: byte-compile ~/.emacs saat disimpan."
-  (when (and buffer-file-name
+  "Byte-compile user-init-file saat disimpan.
+[FIX v8.7] pakai user-init-file bukan hardcode ~/.emacs."
+  (when (and buffer-file-name user-init-file
              (string= (expand-file-name buffer-file-name)
-                      (expand-file-name "~/.emacs")))
-    (byte-compile-file buffer-file-name)
-    (message "[NZR] ~/.emacs ter-byte-compile -> .emacs.elc")))
+                      (expand-file-name user-init-file)))
+    (with-demoted-errors "[NZR init-compile] %s"
+      (byte-compile-file buffer-file-name)
+      (message "[NZR] Init ter-byte-compile: %s"
+               (file-name-nondirectory buffer-file-name)))))
 
 (add-hook 'after-save-hook #'my/byte-compile-init-on-save)
 
@@ -141,48 +149,75 @@
   "Daftar nama paket yang dilewati saat idle byte-compile.")
 
 (defun my/idle-byte-compile-packages ()
-  "Byte-compile file .el di background menggunakan async.el."
-  (if (fboundp 'async-start)
-      (async-start
-       `(lambda ()
-          (require 'bytecomp)
-          (let ((dirs (list ,package-user-dir
-                            ,(expand-file-name "lisp/" user-emacs-directory))))
-            (dolist (dir dirs)
+  "Byte-compile semua file .el yang belum punya .elc.
+[FIX v8.7 #1] Sync path kini pakai directory-files-RECURSIVELY.
+[FIX v8.7 #2] Juga compile user-init-file jika .elc usang/tidak ada."
+  ;; Compile init file jika perlu
+  (when user-init-file
+    (let* ((src (expand-file-name user-init-file))
+           (elc (concat src ".elc")))
+      (when (and (file-exists-p src)
+                 (or (not (file-exists-p elc))
+                     (file-newer-than-file-p src elc)))
+        (with-demoted-errors "[NZR init-compile idle] %s"
+          (byte-compile-file src)))))
+  ;; Compile direktori paket
+  (let ((dirs (delq nil (list package-user-dir
+                              (let ((d (expand-file-name "lisp/" user-emacs-directory)))
+                                (and (file-directory-p d) d))))))
+    (if (fboundp 'async-start)
+        (async-start
+         `(lambda ()
+            (require 'bytecomp)
+            (dolist (dir ',dirs)
               (when (file-directory-p dir)
                 (dolist (el-file (directory-files-recursively dir "\\.el$"))
-                  (let* ((elc-file (concat el-file "c"))
-                         (pkg-name (file-name-nondirectory
-                                   (directory-file-name
-                                    (file-name-directory el-file))))
-                         (is-dir-locals (string-suffix-p ".dir-locals.el" el-file)))
-                    (when (and (not (file-exists-p elc-file))
-                               (not is-dir-locals)
-                               (not (string-match-p
+                  (let* ((elc   (concat el-file "c"))
+                         (pname (file-name-nondirectory
+                                 (directory-file-name
+                                  (file-name-directory el-file))))
+                         (skip  (or (string-suffix-p ".dir-locals.el" el-file)
+                                    (string-match-p
                                      "\\(-pkg\\|-autoloads\\|-test\\)\\.el$"
-                                     el-file))
-                               (not (member pkg-name ',my/byte-compile-blacklist)))
-                      (ignore-errors (byte-compile-file el-file)))))))))
-       (lambda (_result) (message "[NZR] Async byte-compile selesai")))
-    (let ((dirs (list package-user-dir)))
-      (dolist (dir dirs)
-        (when (file-directory-p dir)
-          (dolist (el-file (directory-files dir t "\\.el$"))
-            (let* ((elc-file (concat el-file "c"))
-                   (pkg-name (file-name-nondirectory
+                                     el-file)
+                                    (member pname ',my/byte-compile-blacklist))))
+                    (when (and (not (file-exists-p elc)) (not skip))
+                      (ignore-errors (byte-compile-file el-file))))))))
+         (lambda (_) (message "[NZR] Async byte-compile selesai ✓")))
+      ;; Sync fallback (Termux / tanpa async.el)
+      (let ((n 0))
+        (dolist (dir dirs)
+          (when (file-directory-p dir)
+            ;; [FIX] directory-files-recursively bukan directory-files biasa
+            (dolist (el-file (directory-files-recursively dir "\\.el$"))
+              (let* ((elc   (concat el-file "c"))
+                     (pname (file-name-nondirectory
                              (directory-file-name
                               (file-name-directory el-file))))
-                   (is-dir-locals (string-suffix-p ".dir-locals.el" el-file)))
-              (when (and (not (file-exists-p elc-file))
-                         (not is-dir-locals)
-                         (not (string-match-p
-                               "\\(-pkg\\|-autoloads\\|-test\\)\\.el$"
-                               el-file))
-                         (not (member pkg-name my/byte-compile-blacklist)))
-                (with-demoted-errors "[NZR byte-compile] %s"
-                  (byte-compile-file el-file))))))))))
+                     (skip  (or (string-suffix-p ".dir-locals.el" el-file)
+                                (string-match-p
+                                 "\\(-pkg\\|-autoloads\\|-test\\)\\.el$"
+                                 el-file)
+                                (member pname my/byte-compile-blacklist))))
+                (when (and (not (file-exists-p elc)) (not skip))
+                  (with-demoted-errors "[NZR byte-compile] %s"
+                    (byte-compile-file el-file)
+                    (setq n (1+ n))))))))
+        (when (> n 0)
+          (message "[NZR] Byte-compiled %d file(s) ✓" n))))))
 
-(run-with-idle-timer 60 nil #'my/idle-byte-compile-packages)
+;; [FIX v8.7] nil → t agar timer berulang, bukan hanya sekali seumur hidup
+(run-with-idle-timer  30 nil #'my/idle-byte-compile-packages) ; pertama kali
+(run-with-idle-timer 120 t   #'my/idle-byte-compile-packages) ; berkala tiap 120 dtk
+
+;; Compile manual: M-x my/byte-compile-all
+(defun my/byte-compile-all ()
+  "Compile semua .el secara manual — gunakan setelah install/update paket."
+  (interactive)
+  (message "[NZR] Memulai byte-compile semua paket...")
+  (my/idle-byte-compile-packages)
+  (message "[NZR] Byte-compile selesai."))
+
 
 ;; ════════════════════════════════════════════════════════════════════════
 ;; §5  UI DASAR
@@ -501,7 +536,7 @@
 ;; ── DART MODE ─────────────────────────────────────────────────────────
 (use-package dart-mode
   :ensure t
-  :defer t
+  ;; Tidak pakai :defer t — dart-mode harus siap saat .dart file dibuka
   :mode ("\\.dart\\'" . dart-mode)
   :custom
   (dart-format-on-save t)
@@ -519,12 +554,30 @@
               (when (file-directory-p candidate) candidate))
             nil)))
 
+;; Fallback eksplisit: jika dart-mode gagal load, .dart tetap buka
+;; di prog-mode (bukan fundamental-mode) sehingga hooks tetap terpicu
+(with-eval-after-load 'dart-mode
+  (add-to-list 'auto-mode-alist '("\\.dart\\'" . dart-mode)))
+(unless (fboundp 'dart-mode)
+  (add-to-list 'auto-mode-alist '("\\.dart\\'" . prog-mode)))
+
 ;; ── LSP MODE ──────────────────────────────────────────────────────────
 (use-package lsp-mode
   :ensure t
   :defer t
   :commands (lsp lsp-deferred)
-  :hook ((dart-mode . lsp-deferred))
+  :hook ((dart-mode . (lambda ()
+                        ;; [FIX v8.5] Hanya mulai LSP jika Dart/Flutter SDK
+                        ;; ditemukan di PATH. Mencegah error "Unable to find
+                        ;; installed server" di Termux tanpa Dart SDK.
+                        ;; Guides Elisp (my/dart-guide--render) tetap berjalan
+                        ;; tanpa LSP — tidak perlu Dart SDK sama sekali.
+                        (when (or (executable-find "dart")
+                                  (executable-find "flutter")
+                                  (and (boundp 'dart-sdk-path)
+                                       (stringp dart-sdk-path)
+                                       (file-directory-p dart-sdk-path)))
+                          (lsp-deferred)))))
   :init
   (setq lsp-keymap-prefix "C-c l")
   :custom
@@ -641,7 +694,7 @@
   ;; Closing Labels — face styling
   (when (facep 'lsp-dart-closing-label-face)
     (set-face-attribute 'lsp-dart-closing-label-face nil
-      :foreground "#6a737d" :slant 'italic :height 0.85)))
+      :foreground "#00cc66" :slant 'italic :height 0.85)))
 
 ;; ── flutter.el ────────────────────────────────────────────────────────
 (use-package flutter
@@ -762,12 +815,12 @@
   "Karakter UI Guides — Unicode jika terminal mendukung, ASCII fallback.")
 
 (defface my/ui-guide-face
-  '((t :foreground "#4a5568" :background unspecified :weight normal))
-  "Face untuk UI Guides.")
+  '((t :foreground "#3a5a45" :background unspecified :weight normal))
+  "Face untuk UI Guides — hijau abu-abu gelap untuk │ dan ├──.")
 
 (defface my/ui-guide-active-face
-  '((t :foreground "#00ff88" :background unspecified :weight bold))
-  "Face untuk guide aktif.")
+  '((t :foreground "#5a8a6a" :background unspecified :weight bold))
+  "Face untuk guide aktif — hijau abu-abu untuk └──.")
 
 ;; ── [REF] Fungsi UI Guides dengan (ignore-errors ...) idiomatic ───────
 
@@ -779,34 +832,38 @@
 ;;  v8.3        : refactor jadi my/ui-guide--place-ov (shared oleh dart + generic)
 
 (defun my/ui-guide--place-ov (line col str face)
-  "Buat overlay di LINE/COL, tampilkan STR dengan FACE.
-Kasus normal : ada whitespace → ganti dengan STR via 'display.
-Kasus EOL    : baris terlalu pendek → zero-width overlay + 'before-string."
-  (ignore-errors
-    (save-excursion
-      (goto-char (point-min))
-      (forward-line line)
-      (move-to-column col)
-      (cond
-       ;; ── Normal: kolom ada karakter whitespace ──────────────────────
-       ((and (< (point) (line-end-position))
-             (looking-at "\\s-"))
-        (let ((ov (make-overlay (point)
-                                (min (line-end-position)
-                                     (+ (point) (length str))))))
-          (overlay-put ov 'category 'my/ui-guide)
-          (overlay-put ov 'display  (propertize str 'face face))
-          (overlay-put ov 'priority 200)))
-       ;; ── EOL: baris lebih pendek dari col ──────────────────────────
-       ((eolp)
-        (let* ((pad (max 0 (- col (current-column))))
-               (ov  (make-overlay (point) (point))))
-          (overlay-put ov 'category      'my/ui-guide)
-          (overlay-put ov 'before-string
-                       (propertize (concat (make-string pad ?\s) str)
-                                   'face face))
-          (overlay-put ov 'priority 200)))))))
-
+  "Buat overlay di LINE/COL dengan STR menggunakan FACE.
+v8.6 FIX: Setiap karakter dibuat overlay TERPISAH sehingga
+box-drawing chars tepat tampil di Termux terminal.
+Sebelumnya: 3-char display-property sering tidak ter-render."
+  (let ((offset 0))
+    (mapc
+     (lambda (ch)
+       (let ((s    (char-to-string ch))
+             (col2 (+ col offset)))
+         (ignore-errors
+           (save-excursion
+             (goto-char (point-min))
+             (forward-line line)
+             (move-to-column col2)
+             (cond
+              ((and (< (point) (line-end-position))
+                    (looking-at "\\s-"))
+               (let ((ov (make-overlay (point) (1+ (point)))))
+                 (overlay-put ov 'category 'my/ui-guide)
+                 (overlay-put ov 'display  (propertize s 'face face))
+                 (overlay-put ov 'priority 200)))
+              ((eolp)
+               (let* ((pad (max 0 (- col2 (current-column))))
+                      (ov  (make-overlay (point) (point))))
+                 (overlay-put ov 'category      'my/ui-guide)
+                 (overlay-put ov 'before-string
+                              (propertize
+                               (concat (make-string pad ?\s) s)
+                               'face face))
+                 (overlay-put ov 'priority 200))))))
+         (setq offset (1+ offset))))
+     (string-to-list str))))
 ;; Alias untuk kompatibilitas mundur (my/ui-guide--render masih pakai nama lama)
 (defalias 'my/ui-guide--add-overlay #'my/ui-guide--place-ov)
 
@@ -975,16 +1032,24 @@ Return nomor baris (0-based) atau nil."
       (setq line (1+ line)))
     result))
 
-(defun my/dart-guide--named-params (open-line close-line child-indent)
-  "Kumpulkan baris-baris named param di CHILD-INDENT antara OPEN-LINE dan CLOSE-LINE.
-Named param cocok pola: teks trimmed dimulai dengan 'identifier:'"
-  (let (params (line (1+ open-line)))
+(defun my/dart-guide--direct-children (open-line close-line child-indent)
+  "Semua baris anak langsung di CHILD-INDENT antara OPEN-LINE dan CLOSE-LINE.
+v8.4: lebih robust dari named-params — menangkap SEMUA children (named params,
+positional params, child:, children:) bukan hanya \\w+: pattern.
+Mengabaikan: baris kosong, baris penutup (hanya mengandung );,{})."
+  (let (children (line (1+ open-line)))
     (while (< line close-line)
-      (when (and (= (my/ui-guide--get-indent line) child-indent)
-                 (string-match-p "^\\w+:" (my/dart-guide--line-text line)))
-        (push line params))
+      (let ((ind  (my/ui-guide--get-indent line))
+            (text (my/dart-guide--line-text line)))
+        (when (and (= ind child-indent)
+                   (not (string-empty-p text))
+                   ;; Bukan baris penutup/separator murni
+                   (not (string-match-p "^[\\]});,]+$" text))
+                   ;; Bukan baris komentar saja
+                   (not (string-match-p "^//" text)))
+          (push line children)))
       (setq line (1+ line)))
-    (nreverse params)))
+    (nreverse children)))
 
 ;; ── Rendering ────────────────────────────────────────────────────────
 
@@ -999,50 +1064,102 @@ Named param cocok pola: teks trimmed dimulai dengan 'identifier:'"
         (overlay-put ov 'category    'my/ui-guide)
         (overlay-put ov 'after-string
                      (propertize (format " // %s" widget-name)
-                                 'face '(:foreground "#5c6370" :slant italic)))
+                                 'face '(:foreground "#00cc66" :slant italic)))
         (overlay-put ov 'priority 200)))))
 
-(defun my/dart-guide--render ()
-  "Render VS Code-style Flutter widget guides di seluruh Dart buffer.
-Dipanggil dari my/ui-guide-update ketika major-mode adalah dart-mode."
+(defun my/tree-guide--child-indent (open-line total parent-indent)
+  "Cari indent anak langsung pertama setelah OPEN-LINE yang lebih dalam dari PARENT-INDENT.
+Bekerja untuk semua tipe file berdasarkan indentasi murni."
+  (let ((line (1+ open-line)) result)
+    (while (and (not result) (< line total))
+      (let ((ind  (my/ui-guide--get-indent line))
+            (text (string-trim (or (my/ui-guide--line-content line) ""))))
+        (cond
+         ((string-empty-p text))                   ; baris kosong: skip
+         ((> ind parent-indent) (setq result ind)) ; lebih dalam: ini child-indent
+         (t (setq line total))))                    ; sama/lebih dangkal: tidak ada anak
+      (setq line (1+ line)))
+    result))
+
+(defun my/tree-guide--find-close (open-line parent-indent total)
+  "Cari baris akhir blok OPEN-LINE berdasarkan indentasi (universal, non-Dart).
+Return baris terakhir yang masih bagian dari blok."
+  (let ((line (1+ open-line)) result)
+    (while (and (not result) (< line total))
+      (let ((ind  (my/ui-guide--get-indent line))
+            (text (string-trim (or (my/ui-guide--line-content line) ""))))
+        (when (and (not (string-empty-p text)) (<= ind parent-indent))
+          (setq result (1- line))))
+      (setq line (1+ line)))
+    (or result (1- total))))
+
+(defun my/tree-guide--all-children (open-line close-line child-indent)
+  "Semua baris anak langsung di CHILD-INDENT antara OPEN dan CLOSE.
+Versi universal: hanya skip baris kosong."
+  (let (children (line (1+ open-line)))
+    (while (< line close-line)
+      (let ((ind  (my/ui-guide--get-indent line))
+            (text (string-trim (or (my/ui-guide--line-content line) ""))))
+        (when (and (= ind child-indent) (not (string-empty-p text)))
+          (push line children)))
+      (setq line (1+ line)))
+    (nreverse children)))
+
+(defun my/tree-guide--render ()
+  "Render VS Code-style tree guides (├── └── │) untuk SEMUA tipe file.
+v8.6: Universal — deteksi blok murni dari indentasi, bukan syntax-specific.
+      File .dart: tambah closing label // WidgetName.
+      File lain : hanya tree guides tanpa label."
   (my/ui-guide-clear)
-  (let ((total (count-lines (point-min) (point-max))))
+  (let ((total (count-lines (point-min) (point-max)))
+        (is-dart (my/dart-guide--is-dart-buffer)))
     (when (> total 1)
       (dotimes (open-line total)
-        (when (my/dart-guide--is-opener open-line)
-          (let* ((p-ind  (my/ui-guide--get-indent open-line))
-                 (close  (my/dart-guide--find-close open-line p-ind total))
-                 (c-ind  (when close (my/dart-guide--child-indent open-line close)))
-                 ;; guide-col = child_indent - 3: agar └── menggantikan 3 spasi
-                 ;; sebelum param, sehingga konten tetap pada kolom aslinya
-                 (g-col  (when c-ind (- c-ind 3))))
-            (when (and close c-ind g-col (>= g-col 0))
-              ;; ── Closing comment: // WidgetName ──────────────────────
-              (let ((wname (my/dart-guide--widget-name open-line)))
-                (when wname
-                  (my/dart-guide--add-close-label close wname)))
-              ;; ── Named param guides ───────────────────────────────────
-              (let* ((params (my/dart-guide--named-params open-line close c-ind))
-                     (n      (length params)))
-                (dotimes (i n)
-                  (let* ((pl      (nth i params))
-                         (is-last (= i (1- n)))
-                         (next-pl (unless is-last (nth (1+ i) params))))
-                    ;; ├── atau └── di baris param ini
-                    (my/ui-guide--place-ov
-                     pl g-col
-                     (if is-last "└──" "├──")
-                     (if is-last 'my/ui-guide-active-face 'my/ui-guide-face))
-                    ;; │ pada SEMUA baris antara non-last param & sibling berikutnya
-                    ;; (termasuk baris-baris blok inner → hasilnya overlay bertumpuk
-                    ;;  dengan ├──/└── dari level lebih dalam, kolom berbeda = ✓)
-                    (unless is-last
-                      (when next-pl
-                        (let ((from (1+ pl)))
-                          (while (< from next-pl)
-                            (my/ui-guide--place-ov
-                             from g-col "│" 'my/ui-guide-face)
-                            (setq from (1+ from))))))))))))))))
+        (let* ((p-ind (my/ui-guide--get-indent open-line))
+               (text  (string-trim
+                       (or (my/ui-guide--line-content open-line) ""))))
+          (unless (string-empty-p text)
+            (let* (;; Cari child-indent: indent anak pertama yang lebih dalam
+                   (c-ind (my/tree-guide--child-indent open-line total p-ind))
+                   ;; Cari close-line tergantung tipe file
+                   (close (when c-ind
+                            (if is-dart
+                                (my/dart-guide--find-close open-line p-ind total)
+                              (my/tree-guide--find-close open-line p-ind total))))
+                   ;; guide-col = child_indent - 3: agar ├── menggantikan
+                   ;; 3 spasi sebelum isi anak → isi tetap di kolom aslinya
+                   (g-col (when c-ind (- c-ind 3))))
+              (when (and c-ind close g-col (>= g-col 0))
+                ;; ── Dart only: closing label // WidgetName ────────────
+                (when is-dart
+                  (let ((wname (my/dart-guide--widget-name open-line)))
+                    (when wname
+                      (my/dart-guide--add-close-label close wname))))
+                ;; ── Tree guides ├──/└──/│ untuk semua tipe file ───────
+                (let* ((children (if is-dart
+                                     (my/dart-guide--direct-children
+                                      open-line close c-ind)
+                                   (my/tree-guide--all-children
+                                    open-line close c-ind)))
+                       (n (length children)))
+                  (dotimes (i n)
+                    (let* ((cl      (nth i children))
+                           (is-last (= i (1- n)))
+                           (next-cl (unless is-last (nth (1+ i) children))))
+                      ;; ├── atau └── di baris anak
+                      (my/ui-guide--place-ov
+                       cl g-col
+                       (if is-last "└──" "├──")
+                       (if is-last 'my/ui-guide-active-face 'my/ui-guide-face))
+                      ;; │ di baris antara non-last anak & sibling berikutnya
+                      (unless is-last
+                        (when next-cl
+                          (let ((from (1+ cl)))
+                            (while (< from next-cl)
+                              (my/ui-guide--place-ov
+                               from g-col "│" 'my/ui-guide-face)
+                              (setq from (1+ from)))))))))))))))))
+
 
 ;; [OPT] Throttle dengan idle-timer — jauh lebih efisien daripada post-command-hook
 (defvar my/ui-guide--timer nil
@@ -1052,20 +1169,69 @@ Dipanggil dari my/ui-guide-update ketika major-mode adalah dart-mode."
   (if my/is-termux 0.5 0.25)
   "Delay (detik) sebelum UI Guides di-update setelah idle.")
 
+(defun my/dart-guide--is-dart-buffer ()
+  "Non-nil jika buffer ini adalah Dart file."
+  (or (eq major-mode 'dart-mode)
+      (and buffer-file-name
+           (string-match-p "\\.dart\\'" buffer-file-name))))
+
 (defun my/ui-guide-update ()
-  "Update UI Guides (dipanggil setelah idle, bukan setiap keypress).
-v8.3: dispatch mode-aware — dart-mode → VS Code widget tree,
-      semua mode lain → generic indent guide."
+  "Update UI Guides (dipanggil via idle-timer).
+v8.6: my/tree-guide--render dipakai untuk SEMUA tipe file.
+      Dart → tree guides + closing labels.
+      Semua lain → tree guides saja (├── └── │ dari indentasi)."
   (when (and my/ui-guide-mode
              (not (minibufferp))
              (not (string-prefix-p "*" (buffer-name)))
              (> (buffer-size) 0))
-    (if (eq major-mode 'dart-mode)
-        ;; ── Dart: VS Code-style widget tree (├── └── │ // Comment) ──
-        (my/dart-guide--render)
-      ;; ── Semua mode lain: simple vertical indent guide ─────────────
-      (let ((guides (my/ui-guide--build-tree)))
-        (my/ui-guide--render guides)))))
+    (my/tree-guide--render)))
+
+
+(defun my/dart-guide-diagnose ()
+  "Tampilkan info diagnostik Flutter Widget Guides di buffer saat ini.
+Jalankan dari buffer .dart yang ingin diperiksa."
+  (interactive)
+  (let* ((is-dart  (my/dart-guide--is-dart-buffer))
+         (total    (count-lines (point-min) (point-max)))
+         (openers  '())
+         (buf      (get-buffer-create "*Dart Guide Diagnose*")))
+    ;; Kumpulkan widget openers
+    (dotimes (line total)
+      (when (my/dart-guide--is-opener line)
+        (let* ((p-ind (my/ui-guide--get-indent line))
+               (close (my/dart-guide--find-close line p-ind total))
+               (c-ind (when close (my/dart-guide--child-indent line close)))
+               (g-col (when c-ind (- c-ind 3)))
+               (kids  (when (and close c-ind g-col (>= g-col 0))
+                        (my/dart-guide--direct-children line close c-ind))))
+          (push (list (1+ line)
+                      (my/dart-guide--widget-name line)
+                      p-ind c-ind g-col
+                      (length (or kids '())))
+                openers))))
+    (with-current-buffer buf
+      (read-only-mode -1)
+      (erase-buffer)
+      (insert "╔══ DART GUIDE DIAGNOSE ══════════════════════╗\n")
+      (insert (format "  File      : %s\n" (or buffer-file-name "(tidak ada)")))
+      (insert (format "  major-mode: %s\n" major-mode))
+      (insert (format "  dart-buf-p: %s\n" is-dart))
+      (insert (format "  ui-guide  : %s\n" (if (bound-and-true-p my/ui-guide-mode)
+                                               "AKTIF" "tidak aktif")))
+      (insert (format "  total baris: %d\n" total))
+      (insert "╠══ Widget Openers ═══════════════════════════╣\n")
+      (if openers
+          (dolist (o (nreverse openers))
+            (insert (format "  Baris %-4d │ %-20s│ p=%d c=%s g=%s children=%d\n"
+                            (nth 0 o) (or (nth 1 o) "?")
+                            (nth 2 o)
+                            (if (nth 3 o) (number-to-string (nth 3 o)) "nil")
+                            (if (nth 4 o) (number-to-string (nth 4 o)) "nil")
+                            (nth 5 o))))
+        (insert "  (tidak ada widget opener ditemukan)\n"))
+      (insert "╚═════════════════════════════════════════════╝\n")
+      (read-only-mode 1))
+    (pop-to-buffer buf)))
 
 (defun my/ui-guide--schedule-update ()
   "Jadwalkan update UI Guides via idle timer (throttled)."
@@ -1112,8 +1278,15 @@ v8.3: dispatch mode-aware — dart-mode → VS Code widget tree,
           (lambda ()
             (run-with-timer 1 nil
                             (lambda ()
+                              ;; after-change-major-mode-hook: untuk file yang mode-nya berubah
                               (add-hook 'after-change-major-mode-hook
                                         #'my/ui-guide-auto-enable)
+                              ;; find-file-hook: untuk file yang langsung buka di fundamental-mode
+                              ;; (mis. .dart tanpa dart-mode, .txt, dsb.) — mode TIDAK berubah
+                              ;; sehingga after-change-major-mode-hook tidak terpicu
+                              (add-hook 'find-file-hook
+                                        #'my/ui-guide-auto-enable)
+                              ;; Aktifkan di buffer yang sudah terbuka
                               (dolist (buf (buffer-list))
                                 (with-current-buffer buf
                                   (my/ui-guide-auto-enable)))))))
@@ -1142,11 +1315,11 @@ v8.3: dispatch mode-aware — dart-mode → VS Code widget tree,
 (defun my/flutter-diagnostic ()
   "Diagnostic report lengkap: environment, package, path, dan mode aktif."
   (interactive)
-  (let ((buf (get-buffer-create "*Flutter Diagnostic v8.3*")))
+  (let ((buf (get-buffer-create "*Flutter Diagnostic v8.7*")))
     (with-current-buffer buf
       (erase-buffer)
       (insert "╔══════════════════════════════════════════════════════╗\n")
-      (insert "║     FLUTTER/LSP DIAGNOSTIC REPORT v8.3               ║\n")
+      (insert "║     FLUTTER/LSP DIAGNOSTIC REPORT v8.7               ║\n")
       (insert "╚══════════════════════════════════════════════════════╝\n\n")
 
       ;; Environment
@@ -1370,7 +1543,7 @@ v8.3: dispatch mode-aware — dart-mode → VS Code widget tree,
 (add-hook 'emacs-startup-hook
   (lambda ()
     (message
-     (concat "[NZR] v8.3 | %.2fs | GC×%d | %s | "
+     (concat "[NZR] v8.7 | %.2fs | GC×%d | %s | "
              "Byte-compile: ON | GCMH: ON (%dMB) | "
              "UI-Guide: throttled idle %.2fs | "
              "Palette: 8 depth | Bracket: rainbow-delimiters | "
@@ -1387,5 +1560,21 @@ v8.3: dispatch mode-aware — dart-mode → VS Code widget tree,
      (if my/is-emacs29+ "✓" "✗"))))
 
 ;; ════════════════════════════════════════════════════════════════════════
-;; END OF ~/.emacs  v8.3  (Flutter Widget Tree Guides — VS Code Style)
+;; END OF ~/.emacs  v8.7  (Byte-Compile Fix)
 ;; ════════════════════════════════════════════════════════════════════════
+(custom-set-variables
+ ;; custom-set-variables was added by Custom.
+ ;; If you edit it by hand, you could mess it up, so be careful.
+ ;; Your init file should contain only one such instance.
+ ;; If there is more than one, they won't work right.
+ '(package-selected-packages
+   '(company-quickhelp flutter flycheck gcmh highlight-indent-guides
+                       indent-bars lsp-dart lsp-ui org-bullets
+                       org-modern rainbow-delimiters undo-fu
+                       yasnippet-snippets)))
+(custom-set-faces
+ ;; custom-set-faces was added by Custom.
+ ;; If you edit it by hand, you could mess it up, so be careful.
+ ;; Your init file should contain only one such instance.
+ ;; If there is more than one, they won't work right.
+ )
